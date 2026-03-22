@@ -28,7 +28,7 @@
       "@constants/*": [
         "src/constants/*"
       ],
-      "@types/*": [
+      "@app-types/*": [
         "src/types/*"
       ],
       "@assets/*": [
