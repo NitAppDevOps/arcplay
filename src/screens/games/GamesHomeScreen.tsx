@@ -37,8 +37,9 @@ export default function GamesHomeScreen({ navigation }: Props): React.JSX.Elemen
 
           {/* Rummy */}
           <TouchableOpacity
-            style={[styles.gameCard, styles.gameCardDisabled]}
-            accessibilityLabel="Play Rummy — coming soon"
+            style={styles.gameCard}
+            onPress={() => navigation.navigate('RummyHome')}
+            accessibilityLabel="Play Rummy"
           >
             <View style={styles.gameIcon}>
               <Text style={styles.gameEmoji}>🃏</Text>

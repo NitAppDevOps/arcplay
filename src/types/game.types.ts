@@ -47,7 +47,7 @@ export interface IChessMove {
 }
 
 /** Rummy variant types */
-export type RummyVariant = 'points' | 'deals' | 'pool101' | 'pool201';
+//export type RummyVariant = 'points' | 'deals' | 'pool101' | 'pool201';
 
 /** A playing card */
 export interface ICard {
@@ -72,3 +72,56 @@ export const TIME_CONTROLS: ITimeControl[] = [
   { label: 'Rapid — 15 min', seconds: 900, format: 'rapid' },
   { label: 'Classical — 30 min', seconds: 1800, format: 'classical' },
 ];
+/** A standard playing card with suit and rank */
+export type Suit = 'hearts' | 'diamonds' | 'clubs' | 'spades';
+export type Rank = 'A' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K';
+
+export interface IRummyCard {
+  id: string;           // unique identifier e.g. 'hearts_A'
+  suit: Suit;
+  rank: Rank;
+  isJoker: boolean;
+  points: number;       // point value if unmelded at declaration
+}
+
+/** A meld — sequence or set */
+export type MeldType = 'sequence' | 'set';
+
+export interface IMeld {
+  id: string;
+  cards: IRummyCard[];
+  type: MeldType;
+  isValid: boolean;
+  isPureSequence: boolean; // sequence with no joker
+}
+
+/** Rummy game variants */
+export type RummyVariant = 'points' | 'deals' | 'pool101' | 'pool201';
+
+/** A single player's state in the game */
+export interface IRummyPlayer {
+  id: string;
+  name: string;
+  hand: IRummyCard[];
+  melds: IMeld[];
+  points: number;       // accumulated points (pool/deals)
+  chips: number;        // chips remaining (deals rummy)
+  isEliminated: boolean;
+  hasDropped: boolean;
+}
+
+/** Full Rummy game state */
+export interface IRummyGameState {
+  variant: RummyVariant;
+  players: IRummyPlayer[];
+  stock: IRummyCard[];         // draw pile
+  discardPile: IRummyCard[];   // discard pile
+  currentPlayerIndex: number;
+  jokerCard: IRummyCard | null; // the open joker for this game
+  phase: 'dealing' | 'playing' | 'declaring' | 'scoring' | 'finished';
+  turnPhase: 'draw' | 'discard'; // within a turn
+  dealNumber: number;          // for deals rummy
+  totalDeals: number;          // for deals rummy
+  winner: string | null;
+  isGameOver: boolean;
+}
