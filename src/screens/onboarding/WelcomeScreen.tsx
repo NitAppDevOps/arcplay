@@ -61,7 +61,7 @@ export default function WelcomeScreen({ navigation }: Props): React.JSX.Element 
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.btnSecondary}
-            onPress={() => navigation.navigate('Register')}
+            onPress={() => navigation.navigate('Login')}
             accessibilityLabel="Log in to existing ARCPLAY account"
           >
             <Text style={styles.btnSecondaryText}>I already have an account</Text>

@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TextInput,
   TouchableOpacity,
-  ScrollView,
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
@@ -14,73 +13,26 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { OnboardingStackParamList } from '@app-types/navigation.types';
 import { COLOURS } from '@constants/colours';
-import { signUpWithEmail, signInWithGoogle } from '@services/supabase';
+import { signInWithEmail, signInWithGoogle } from '@services/supabase';
 
-type Props = NativeStackScreenProps<OnboardingStackParamList, 'Register'>;
+type Props = NativeStackScreenProps<OnboardingStackParamList, 'Login'>;
 
-interface IFormField {
-  label: string;
-  placeholder: string;
-  key: keyof IFormState;
-  secure?: boolean;
-  keyboard?: 'default' | 'email-address' | 'numeric';
-}
-
-interface IFormState {
-  fullName: string;
-  username: string;
-  email: string;
-  password: string;
-  dateOfBirth: string;
-}
-
-const FIELDS: IFormField[] = [
-  { label: 'Full Name', placeholder: 'Your real name', key: 'fullName' },
-  { label: 'Username', placeholder: 'Unique player handle', key: 'username' },
-  { label: 'Email', placeholder: 'your@email.com', key: 'email', keyboard: 'email-address' },
-  { label: 'Password', placeholder: 'Min 8 characters', key: 'password', secure: true },
-  { label: 'Date of Birth', placeholder: 'DD/MM/YYYY', key: 'dateOfBirth' },
-];
-
-/** RegisterScreen — creates a new Supabase user account */
-export default function RegisterScreen({ navigation }: Props): React.JSX.Element {
-  const [form, setForm] = useState<IFormState>({
-    fullName: '',
-    username: '',
-    email: '',
-    password: '',
-    dateOfBirth: '',
-  });
+/** LoginScreen — signs in existing users via email/password or Google */
+export default function LoginScreen({ navigation }: Props): React.JSX.Element {
+  const [email, setEmail] = useState<string>('');
+  const [password, setPassword] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
-  /** Validates form fields before submitting */
-  const validate = (): boolean => {
-    if (!form.fullName.trim()) { setError('Please enter your full name.'); return false; }
-    if (!form.username.trim()) { setError('Please choose a username.'); return false; }
-    if (!form.email.includes('@')) { setError('Please enter a valid email address.'); return false; }
-    if (form.password.length < 8) { setError('Password must be at least 8 characters.'); return false; }
-    if (form.dateOfBirth.length < 8) { setError('Please enter your date of birth.'); return false; }
-    return true;
-  };
-
-  /** Submits registration to Supabase */
-  const handleRegister = async (): Promise<void> => {
+  /** Signs in with email and password */
+  const handleLogin = async (): Promise<void> => {
     setError('');
-    if (!validate()) return;
+    if (!email.includes('@')) { setError('Please enter a valid email address.'); return; }
+    if (password.length < 8) { setError('Please enter your password.'); return; }
     setIsLoading(true);
     try {
-      const { error: authError } = await signUpWithEmail(
-        form.email,
-        form.password,
-        form.fullName,
-        form.username
-      );
-      if (authError) {
-        setError(authError);
-        return;
-      }
-      navigation.navigate('AvatarSetup');
+      const { error: authError } = await signInWithEmail(email, password);
+      if (authError) setError(authError);
     } catch (err) {
       setError('An unexpected error occurred. Please try again.');
     } finally {
@@ -108,11 +60,8 @@ export default function RegisterScreen({ navigation }: Props): React.JSX.Element
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        <ScrollView
-          style={styles.flex}
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled"
-        >
+        <View style={styles.inner}>
+
           {/* Header */}
           <TouchableOpacity
             style={styles.back}
@@ -122,10 +71,8 @@ export default function RegisterScreen({ navigation }: Props): React.JSX.Element
             <Text style={styles.backText}>← Back</Text>
           </TouchableOpacity>
 
-          <Text style={styles.title}>Create your account</Text>
-          <Text style={styles.subtitle}>
-            One profile. Every game. All your stats in one place.
-          </Text>
+          <Text style={styles.title}>Welcome back</Text>
+          <Text style={styles.subtitle}>Sign in to your ARCPLAY account</Text>
 
           {/* Google Sign In */}
           <TouchableOpacity
@@ -140,71 +87,69 @@ export default function RegisterScreen({ navigation }: Props): React.JSX.Element
           {/* Divider */}
           <View style={styles.divider}>
             <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or register with email</Text>
+            <Text style={styles.dividerText}>or sign in with email</Text>
             <View style={styles.dividerLine} />
           </View>
 
           {/* Fields */}
           <View style={styles.fields}>
-            {FIELDS.map((field) => (
-              <View key={field.key} style={styles.fieldGroup}>
-                <Text style={styles.label}>{field.label}</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder={field.placeholder}
-                  placeholderTextColor={COLOURS.TEXT_MUTED}
-                  secureTextEntry={field.secure}
-                  keyboardType={field.keyboard ?? 'default'}
-                  autoCapitalize={
-                    field.key === 'email' || field.key === 'password'
-                      ? 'none'
-                      : 'words'
-                  }
-                  value={form[field.key]}
-                  onChangeText={(val) =>
-                    setForm((prev) => ({ ...prev, [field.key]: val }))
-                  }
-                  accessibilityLabel={field.label}
-                />
-              </View>
-            ))}
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>Email</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="your@email.com"
+                placeholderTextColor={COLOURS.TEXT_MUTED}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                value={email}
+                onChangeText={setEmail}
+                accessibilityLabel="Email address"
+              />
+            </View>
+            <View style={styles.fieldGroup}>
+              <Text style={styles.label}>Password</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="Your password"
+                placeholderTextColor={COLOURS.TEXT_MUTED}
+                secureTextEntry
+                autoCapitalize="none"
+                value={password}
+                onChangeText={setPassword}
+                accessibilityLabel="Password"
+              />
+            </View>
           </View>
 
           {/* Error */}
           {error ? <Text style={styles.error}>{error}</Text> : null}
 
-          {/* Age notice */}
-          <Text style={styles.ageNotice}>
-            You must be 13 or older to use ARCPLAY. Users under 18 cannot
-            enter real-money tournaments or sign sponsorship contracts.
-          </Text>
-
           {/* CTA */}
           <TouchableOpacity
             style={[styles.btn, isLoading && styles.btnDisabled]}
-            onPress={handleRegister}
+            onPress={handleLogin}
             disabled={isLoading}
-            accessibilityLabel="Create account"
+            accessibilityLabel="Sign in"
           >
             {isLoading ? (
               <ActivityIndicator color={COLOURS.TEXT_PRIMARY} />
             ) : (
-              <Text style={styles.btnText}>Create Account</Text>
+              <Text style={styles.btnText}>Sign In</Text>
             )}
           </TouchableOpacity>
 
-          {/* Login link */}
+          {/* Register link */}
           <TouchableOpacity
-            onPress={() => navigation.navigate('Login' as never)}
-            accessibilityLabel="Go to login"
+            onPress={() => navigation.navigate('Register')}
+            accessibilityLabel="Go to register"
           >
-            <Text style={styles.loginLink}>
-              Already have an account?{' '}
-              <Text style={styles.loginLinkBold}>Log in</Text>
+            <Text style={styles.registerLink}>
+              Don't have an account?{' '}
+              <Text style={styles.registerLinkBold}>Create one</Text>
             </Text>
           </TouchableOpacity>
 
-        </ScrollView>
+        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -216,7 +161,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLOURS.BACKGROUND,
   },
-  scroll: {
+  inner: {
+    flex: 1,
     paddingHorizontal: 24,
     paddingTop: 16,
     paddingBottom: 40,
@@ -238,7 +184,6 @@ const styles = StyleSheet.create({
   subtitle: {
     color: COLOURS.TEXT_SECONDARY,
     fontSize: 14,
-    lineHeight: 20,
   },
   googleBtn: {
     backgroundColor: COLOURS.SURFACE,
@@ -293,18 +238,11 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
   },
-  ageNotice: {
-    color: COLOURS.TEXT_MUTED,
-    fontSize: 11,
-    lineHeight: 16,
-    textAlign: 'center',
-  },
   btn: {
     backgroundColor: COLOURS.PRIMARY,
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
-    marginTop: 8,
   },
   btnDisabled: {
     backgroundColor: COLOURS.SURFACE_ELEVATED,
@@ -314,12 +252,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  loginLink: {
+  registerLink: {
     color: COLOURS.TEXT_SECONDARY,
     fontSize: 14,
     textAlign: 'center',
   },
-  loginLinkBold: {
+  registerLinkBold: {
     color: COLOURS.PRIMARY,
     fontWeight: '600',
   },

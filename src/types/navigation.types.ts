@@ -13,6 +13,7 @@ export type OnboardingStackParamList = {
   Splash: undefined;
   Welcome: undefined;
   Register: undefined;
+  Login: undefined;
   AvatarSetup: undefined;
   SkillSurvey: undefined;
   GameLibraryIntro: undefined;
