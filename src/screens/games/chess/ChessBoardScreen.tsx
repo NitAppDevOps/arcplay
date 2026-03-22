@@ -6,11 +6,13 @@ import {
   TouchableOpacity,
   Dimensions,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Chess } from 'chess.js';
 import { COLOURS } from '@constants/colours';
 import { useGameStore } from '@store/gameStore';
+import { useAuthStore } from '@store/authStore';
 import {
   createChessGame,
   getGameState,
@@ -19,6 +21,13 @@ import {
   getPieceSymbol,
   requiresPromotion,
 } from '@services/chess';
+import {
+  getRoom,
+  subscribeToMoves,
+  saveMove,
+  updateRoomFen,
+  completeRoom,
+} from '@services/rooms';
 import type { ChessSquare, ChessPieceType } from '@app-types/game.types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { GamesStackParamList } from '@app-types/navigation.types';
@@ -28,23 +37,22 @@ type Props = NativeStackScreenProps<GamesStackParamList, 'ChessBoard'>;
 const { width } = Dimensions.get('window');
 const BOARD_SIZE = width - 32;
 const SQUARE_SIZE = BOARD_SIZE / 8;
+const FILES_WHITE = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+const FILES_BLACK = ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'];
+const RANKS_WHITE = ['8', '7', '6', '5', '4', '3', '2', '1'];
+const RANKS_BLACK = ['1', '2', '3', '4', '5', '6', '7', '8'];
 
-const FILES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-const RANKS = ['8', '7', '6', '5', '4', '3', '2', '1'];
-
-/** Returns the background colour for a board square */
 const getSquareColour = (file: number, rank: number): string => {
   const isLight = (file + rank) % 2 === 0;
   return isLight ? COLOURS.BOARD_LIGHT : COLOURS.BOARD_DARK;
 };
 
-/** ChessBoardScreen — fully playable chess board for two players */
-export default function ChessBoardScreen({ navigation }: Props): React.JSX.Element {
-  const [game, setGame] = useState<Chess>(() => createChessGame());
-  const [showPromotion, setShowPromotion] = useState<boolean>(false);
-  const [pendingMove, setPendingMove] = useState<{ from: ChessSquare; to: ChessSquare } | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string>('White to move');
+/** ChessBoardScreen — local and online multiplayer chess */
+export default function ChessBoardScreen({ navigation, route }: Props): React.JSX.Element {
+  const { roomId } = route.params;
+  const isOnline = roomId !== 'local';
 
+  const { user } = useAuthStore();
   const {
     chessGameState,
     selectedSquare,
@@ -56,48 +64,103 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
     resetChessGame,
   } = useGameStore();
 
-  /** Initialises game state on mount */
+  const [game, setGame] = useState<Chess>(() => createChessGame());
+  const [showPromotion, setShowPromotion] = useState<boolean>(false);
+  const [pendingMove, setPendingMove] = useState<{ from: ChessSquare; to: ChessSquare } | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string>('White to move');
+  const [myColour, setMyColour] = useState<'w' | 'b'>('w');
+  const [isLoadingRoom, setIsLoadingRoom] = useState<boolean>(isOnline);
+
+  /** Initialises the game */
   useEffect(() => {
-    const newGame = createChessGame();
-    setGame(newGame);
-    setChessGameState(getGameState(newGame));
-    resetChessGame();
-    setChessGameState(getGameState(newGame));
+    const init = async (): Promise<void> => {
+      const newGame = createChessGame();
+      resetChessGame();
+      setChessGameState(getGameState(newGame));
+      setGame(newGame);
+
+      if (isOnline && user) {
+        const { room } = await getRoom(roomId);
+        if (room) {
+          const isHost = room.host_id === user.id;
+          const colour = isHost ? room.host_colour : (room.host_colour === 'w' ? 'b' : 'w');
+          setMyColour(colour);
+          if (room.current_fen !== newGame.fen()) {
+            const restoredGame = createChessGame(room.current_fen);
+            setGame(restoredGame);
+            setChessGameState(getGameState(restoredGame));
+          }
+        }
+        setIsLoadingRoom(false);
+      }
+    };
+    init();
   }, []);
 
-  /** Updates status message whenever game state changes */
+  /** Subscribes to opponent moves in online mode */
+  useEffect(() => {
+    if (!isOnline) return;
+    const subscription = subscribeToMoves(roomId, (moveData) => {
+      if (moveData.player_id === user?.id) return;
+      setGame((prevGame) => {
+        const move = makeMove(prevGame, moveData.from_square, moveData.to_square, moveData.promotion ?? 'q');
+        if (!move) return prevGame;
+        addChessMove(move);
+        const newState = getGameState(prevGame);
+        setChessGameState(newState);
+        return createChessGame(newState.fen);
+      });
+    });
+    return () => { subscription.unsubscribe(); };
+  }, [isOnline, roomId]);
+
+  /** Updates status message on game state change */
   useEffect(() => {
     if (!chessGameState) return;
     if (chessGameState.isCheckmate) {
       const winner = chessGameState.turn === 'w' ? 'Black' : 'White';
       setStatusMessage(`Checkmate — ${winner} wins!`);
+      if (isOnline) {
+        const winnerId = chessGameState.turn === 'w'
+          ? (myColour === 'b' ? user?.id ?? null : null)
+          : (myColour === 'w' ? user?.id ?? null : null);
+        completeRoom(roomId, winnerId, 'checkmate');
+      }
     } else if (chessGameState.isStalemate) {
       setStatusMessage('Stalemate — draw!');
+      if (isOnline) completeRoom(roomId, null, 'stalemate');
     } else if (chessGameState.isDraw) {
       setStatusMessage('Draw!');
+      if (isOnline) completeRoom(roomId, null, 'draw');
     } else if (chessGameState.isCheck) {
       const inCheck = chessGameState.turn === 'w' ? 'White' : 'Black';
       setStatusMessage(`${inCheck} is in check!`);
     } else {
       const toMove = chessGameState.turn === 'w' ? 'White' : 'Black';
-      setStatusMessage(`${toMove} to move`);
+      setStatusMessage(isOnline
+        ? chessGameState.turn === myColour ? 'Your turn' : "Opponent's turn"
+        : `${toMove} to move`
+      );
     }
   }, [chessGameState]);
 
-  /** Handles tapping a square on the board */
+  /** Returns true if it is the current user's turn in online mode */
+  const isMyTurn = (): boolean => {
+    if (!isOnline) return true;
+    return chessGameState?.turn === myColour;
+  };
+
+  /** Handles tapping a square */
   const handleSquareTap = useCallback((square: ChessSquare): void => {
     if (chessGameState?.isGameOver) return;
+    if (!isMyTurn()) return;
 
-    // If a square is already selected
     if (selectedSquare) {
-      // Tapped the same square — deselect
       if (selectedSquare === square) {
         setSelectedSquare(null);
         setLegalMoves([]);
         return;
       }
-
-      // Tapped a legal destination — attempt the move
       if (legalMovesForSelected.includes(square)) {
         if (requiresPromotion(selectedSquare, square, game)) {
           setPendingMove({ from: selectedSquare, to: square });
@@ -107,35 +170,30 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
         executeMove(selectedSquare, square);
         return;
       }
-
-      // Tapped another piece of same colour — select that instead
       const piece = game.get(square as any);
       if (piece && piece.color === chessGameState?.turn) {
         setSelectedSquare(square);
         setLegalMoves(getLegalMovesForSquare(game, square));
         return;
       }
-
-      // Tapped empty or enemy square that isn't a legal move — deselect
       setSelectedSquare(null);
       setLegalMoves([]);
       return;
     }
 
-    // No square selected — select if own piece
     const piece = game.get(square as any);
     if (piece && piece.color === chessGameState?.turn) {
       setSelectedSquare(square);
       setLegalMoves(getLegalMovesForSquare(game, square));
     }
-  }, [selectedSquare, legalMovesForSelected, game, chessGameState]);
+  }, [selectedSquare, legalMovesForSelected, game, chessGameState, myColour]);
 
-  /** Executes a move and updates all state */
-  const executeMove = useCallback((
+  /** Executes a move locally and syncs to Supabase in online mode */
+  const executeMove = useCallback(async (
     from: ChessSquare,
     to: ChessSquare,
     promotion: ChessPieceType = 'q'
-  ): void => {
+  ): Promise<void> => {
     const move = makeMove(game, from, to, promotion);
     if (!move) return;
 
@@ -144,8 +202,15 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
     setChessGameState(newState);
     setSelectedSquare(null);
     setLegalMoves([]);
-    setGame(createChessGame(newState.fen));
-  }, [game]);
+    const newGame = createChessGame(newState.fen);
+    setGame(newGame);
+
+    if (isOnline && user) {
+      const moveNumber = (chessGameState?.moveCount ?? 0) + 1;
+      await saveMove(roomId, user.id, move, moveNumber);
+      await updateRoomFen(roomId, newState.fen);
+    }
+  }, [game, chessGameState, isOnline, user, roomId]);
 
   /** Handles promotion piece selection */
   const handlePromotion = useCallback((piece: ChessPieceType): void => {
@@ -155,8 +220,9 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
     setPendingMove(null);
   }, [pendingMove, executeMove]);
 
-  /** Resets the game to the starting position */
+  /** Resets the game — local only */
   const handleNewGame = (): void => {
+    if (isOnline) return;
     const newGame = createChessGame();
     setGame(newGame);
     resetChessGame();
@@ -165,6 +231,8 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
 
   /** Renders a single board square */
   const renderSquare = (fileIdx: number, rankIdx: number): React.JSX.Element => {
+    const FILES = myColour === 'b' ? FILES_BLACK : FILES_WHITE;
+    const RANKS = myColour === 'b' ? RANKS_BLACK : RANKS_WHITE;
     const square = `${FILES[fileIdx]}${RANKS[rankIdx]}` as ChessSquare;
     const piece = game.get(square as any);
     const isSelected = selectedSquare === square;
@@ -180,18 +248,15 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           isSelected && styles.squareSelected,
         ]}
         onPress={() => handleSquareTap(square)}
-        accessibilityLabel={`Square ${square}${piece ? `, ${piece.color === 'w' ? 'white' : 'black'} ${piece.type}` : ''}`}
+        accessibilityLabel={`Square ${square}`}
         activeOpacity={0.8}
       >
-        {/* Legal move indicator */}
         {isLegalMove && (
           <View style={[
             styles.legalDot,
             piece ? styles.legalCapture : styles.legalMove,
           ]} />
         )}
-
-        {/* Piece */}
         {piece && (
           <Text style={[
             styles.piece,
@@ -200,29 +265,35 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
             {getPieceSymbol(piece.type, piece.color)}
           </Text>
         )}
-
-        {/* File label on rank 1 */}
         {rankIdx === 7 && (
           <Text style={[styles.coordLabel, styles.fileLabel]}>
-            {FILES[fileIdx]}
+            {(myColour === 'b' ? FILES_BLACK : FILES_WHITE)[fileIdx]}
           </Text>
         )}
-
-        {/* Rank label on file a */}
         {fileIdx === 0 && (
           <Text style={[styles.coordLabel, styles.rankLabel]}>
-            {RANKS[rankIdx]}
+            {(myColour === 'b' ? RANKS_BLACK : RANKS_WHITE)[rankIdx]}
           </Text>
         )}
       </TouchableOpacity>
     );
   };
 
+  if (isLoadingRoom) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <View style={styles.centred}>
+          <ActivityIndicator size="large" color={COLOURS.PRIMARY} />
+          <Text style={styles.loadingText}>Loading game...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll}>
 
-        {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity
             onPress={() => navigation.goBack()}
@@ -231,17 +302,20 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           >
             <Text style={styles.backText}>← Back</Text>
           </TouchableOpacity>
-          <Text style={styles.title}>Chess</Text>
-          <TouchableOpacity
-            onPress={handleNewGame}
-            accessibilityLabel="New game"
-            style={styles.newGameBtn}
-          >
-            <Text style={styles.newGameText}>New</Text>
-          </TouchableOpacity>
+          <Text style={styles.title}>
+            {isOnline ? `Room ${roomId}` : 'Chess'}
+          </Text>
+          {!isOnline && (
+            <TouchableOpacity
+              onPress={handleNewGame}
+              accessibilityLabel="New game"
+              style={styles.newGameBtn}
+            >
+              <Text style={styles.newGameText}>New</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
-        {/* Status bar */}
         <View style={[
           styles.statusBar,
           chessGameState?.isGameOver && styles.statusBarGameOver,
@@ -250,7 +324,6 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           <Text style={styles.statusText}>{statusMessage}</Text>
         </View>
 
-        {/* Captured pieces — Black captured by White */}
         <View style={styles.capturedRow}>
           {chessGameState?.capturedByWhite.map((p, i) => (
             <Text key={i} style={styles.capturedPiece}>
@@ -259,16 +332,14 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           ))}
         </View>
 
-        {/* Board */}
         <View style={styles.board}>
-          {RANKS.map((_, rankIdx) => (
+          {(myColour === 'b' ? RANKS_BLACK : RANKS_WHITE).map((_, rankIdx) => (
             <View key={rankIdx} style={styles.boardRow}>
-              {FILES.map((_, fileIdx) => renderSquare(fileIdx, rankIdx))}
+              {(myColour === 'b' ? FILES_BLACK : FILES_WHITE).map((_, fileIdx) => renderSquare(fileIdx, rankIdx))}
             </View>
           ))}
         </View>
 
-        {/* Captured pieces — White captured by Black */}
         <View style={styles.capturedRow}>
           {chessGameState?.capturedByBlack.map((p, i) => (
             <Text key={i} style={styles.capturedPiece}>
@@ -277,7 +348,6 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           ))}
         </View>
 
-        {/* Move history */}
         <View style={styles.moveHistory}>
           <Text style={styles.moveHistoryTitle}>Moves</Text>
           <View style={styles.moveList}>
@@ -290,7 +360,6 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
           </View>
         </View>
 
-        {/* Promotion modal */}
         {showPromotion && (
           <View style={styles.promotionOverlay}>
             <View style={styles.promotionBox}>
@@ -319,13 +388,10 @@ export default function ChessBoardScreen({ navigation }: Props): React.JSX.Eleme
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLOURS.BACKGROUND,
-  },
-  scroll: {
-    paddingBottom: 40,
-  },
+  container: { flex: 1, backgroundColor: COLOURS.BACKGROUND },
+  centred: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
+  loadingText: { color: COLOURS.TEXT_SECONDARY, fontSize: 14 },
+  scroll: { paddingBottom: 40 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -333,30 +399,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  backBtn: {
-    paddingVertical: 4,
-    paddingRight: 16,
-  },
-  backText: {
-    color: COLOURS.TEXT_SECONDARY,
-    fontSize: 15,
-  },
-  title: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 18,
-    fontWeight: '700',
-  },
+  backBtn: { paddingVertical: 4, paddingRight: 16 },
+  backText: { color: COLOURS.TEXT_SECONDARY, fontSize: 15 },
+  title: { color: COLOURS.TEXT_PRIMARY, fontSize: 18, fontWeight: '700' },
   newGameBtn: {
     backgroundColor: COLOURS.PRIMARY,
     paddingHorizontal: 14,
     paddingVertical: 6,
     borderRadius: 8,
   },
-  newGameText: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  newGameText: { color: COLOURS.TEXT_PRIMARY, fontSize: 13, fontWeight: '600' },
   statusBar: {
     marginHorizontal: 16,
     marginBottom: 8,
@@ -367,20 +419,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLOURS.BORDER,
   },
-  statusBarCheck: {
-    borderColor: COLOURS.WARNING,
-    backgroundColor: COLOURS.SURFACE_ELEVATED,
-  },
-  statusBarGameOver: {
-    borderColor: COLOURS.PRIMARY,
-    backgroundColor: COLOURS.SURFACE_ELEVATED,
-  },
-  statusText: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
+  statusBarCheck: { borderColor: COLOURS.WARNING, backgroundColor: COLOURS.SURFACE_ELEVATED },
+  statusBarGameOver: { borderColor: COLOURS.PRIMARY, backgroundColor: COLOURS.SURFACE_ELEVATED },
+  statusText: { color: COLOURS.TEXT_PRIMARY, fontSize: 14, fontWeight: '600', textAlign: 'center' },
   capturedRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -388,9 +429,7 @@ const styles = StyleSheet.create({
     minHeight: 24,
     marginBottom: 4,
   },
-  capturedPiece: {
-    fontSize: 16,
-  },
+  capturedPiece: { fontSize: 16 },
   board: {
     width: BOARD_SIZE,
     height: BOARD_SIZE,
@@ -400,66 +439,18 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     overflow: 'hidden',
   },
-  boardRow: {
-    flexDirection: 'row',
-  },
-  square: {
-    width: SQUARE_SIZE,
-    height: SQUARE_SIZE,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  squareSelected: {
-    backgroundColor: COLOURS.BOARD_SELECTED,
-  },
-  legalDot: {
-    position: 'absolute',
-    borderRadius: 50,
-  },
-  legalMove: {
-    width: SQUARE_SIZE * 0.3,
-    height: SQUARE_SIZE * 0.3,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-  },
-  legalCapture: {
-    width: SQUARE_SIZE * 0.9,
-    height: SQUARE_SIZE * 0.9,
-    borderWidth: 3,
-    borderColor: 'rgba(0,0,0,0.2)',
-    backgroundColor: 'transparent',
-  },
-  piece: {
-    fontSize: SQUARE_SIZE * 0.7,
-    lineHeight: SQUARE_SIZE * 0.85,
-  },
-  whitePiece: {
-    color: '#FFFFFF',
-    textShadowColor: 'rgba(0,0,0,0.8)',
-    textShadowOffset: { width: 0.5, height: 0.5 },
-    textShadowRadius: 1,
-  },
-  blackPiece: {
-    color: '#1A1A2E',
-    textShadowColor: 'rgba(255,255,255,0.3)',
-    textShadowOffset: { width: 0.5, height: 0.5 },
-    textShadowRadius: 1,
-  },
-  coordLabel: {
-    position: 'absolute',
-    fontSize: 9,
-    fontWeight: '600',
-    opacity: 0.6,
-  },
-  fileLabel: {
-    bottom: 1,
-    right: 2,
-    color: COLOURS.TEXT_PRIMARY,
-  },
-  rankLabel: {
-    top: 1,
-    left: 2,
-    color: COLOURS.TEXT_PRIMARY,
-  },
+  boardRow: { flexDirection: 'row' },
+  square: { width: SQUARE_SIZE, height: SQUARE_SIZE, alignItems: 'center', justifyContent: 'center' },
+  squareSelected: { backgroundColor: COLOURS.BOARD_SELECTED },
+  legalDot: { position: 'absolute', borderRadius: 50 },
+  legalMove: { width: SQUARE_SIZE * 0.3, height: SQUARE_SIZE * 0.3, backgroundColor: 'rgba(0,0,0,0.2)' },
+  legalCapture: { width: SQUARE_SIZE * 0.9, height: SQUARE_SIZE * 0.9, borderWidth: 3, borderColor: 'rgba(0,0,0,0.2)', backgroundColor: 'transparent' },
+  piece: { fontSize: SQUARE_SIZE * 0.7, lineHeight: SQUARE_SIZE * 0.85 },
+  whitePiece: { color: '#FFFFFF', textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0.5, height: 0.5 }, textShadowRadius: 1 },
+  blackPiece: { color: '#1A1A2E', textShadowColor: 'rgba(255,255,255,0.3)', textShadowOffset: { width: 0.5, height: 0.5 }, textShadowRadius: 1 },
+  coordLabel: { position: 'absolute', fontSize: 9, fontWeight: '600', opacity: 0.6 },
+  fileLabel: { bottom: 1, right: 2, color: COLOURS.TEXT_PRIMARY },
+  rankLabel: { top: 1, left: 2, color: COLOURS.TEXT_PRIMARY },
   moveHistory: {
     marginHorizontal: 16,
     marginTop: 12,
@@ -469,62 +460,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLOURS.BORDER,
   },
-  moveHistoryTitle: {
-    color: COLOURS.TEXT_SECONDARY,
-    fontSize: 12,
-    fontWeight: '600',
-    marginBottom: 6,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  moveList: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
-  moveItem: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 13,
-    fontFamily: 'monospace',
-  },
-  promotionOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: COLOURS.OVERLAY,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  promotionBox: {
-    backgroundColor: COLOURS.SURFACE_ELEVATED,
-    borderRadius: 16,
-    padding: 24,
-    alignItems: 'center',
-    gap: 16,
-    borderWidth: 1,
-    borderColor: COLOURS.BORDER,
-  },
-  promotionTitle: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  promotionOptions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  promotionOption: {
-    width: 56,
-    height: 56,
-    backgroundColor: COLOURS.SURFACE,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLOURS.BORDER,
-  },
-  promotionPiece: {
-    fontSize: 32,
-  },
+  moveHistoryTitle: { color: COLOURS.TEXT_SECONDARY, fontSize: 12, fontWeight: '600', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 },
+  moveList: { flexDirection: 'row', flexWrap: 'wrap' },
+  moveItem: { color: COLOURS.TEXT_PRIMARY, fontSize: 13, fontFamily: 'monospace' },
+  promotionOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: COLOURS.OVERLAY, alignItems: 'center', justifyContent: 'center' },
+  promotionBox: { backgroundColor: COLOURS.SURFACE_ELEVATED, borderRadius: 16, padding: 24, alignItems: 'center', gap: 16, borderWidth: 1, borderColor: COLOURS.BORDER },
+  promotionTitle: { color: COLOURS.TEXT_PRIMARY, fontSize: 16, fontWeight: '600' },
+  promotionOptions: { flexDirection: 'row', gap: 12 },
+  promotionOption: { width: 56, height: 56, backgroundColor: COLOURS.SURFACE, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLOURS.BORDER },
+  promotionPiece: { fontSize: 32 },
 });
