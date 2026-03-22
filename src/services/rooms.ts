@@ -11,7 +11,8 @@ const generateRoomCode = (): string => {
 
 /** Creates a new chess room and returns the room code */
 export const createRoom = async (
-  hostId: string
+  hostId: string,
+  timeControl: number | null = null
 ): Promise<{ roomId: string | null; error: string | null }> => {
   try {
     const roomId = generateRoomCode();
@@ -20,6 +21,7 @@ export const createRoom = async (
       host_id: hostId,
       host_colour: Math.random() > 0.5 ? 'w' : 'b',
       status: 'waiting',
+      time_control: timeControl,
     });
     if (error) return { roomId: null, error: error.message };
     return { roomId, error: null };

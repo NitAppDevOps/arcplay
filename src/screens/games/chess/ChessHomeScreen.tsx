@@ -64,7 +64,7 @@ export default function ChessHomeScreen({ navigation }: Props): React.JSX.Elemen
           {/* Play locally */}
           <TouchableOpacity
             style={styles.optionCard}
-            onPress={() => navigation.navigate('ChessBoard', { roomId: 'local' })}
+            onPress={() => navigation.navigate('ChessBoard', { roomId: 'local', timeControl: null })}
             accessibilityLabel="Play chess locally"
           >
             <Text style={styles.optionEmoji}>👥</Text>
@@ -135,16 +135,18 @@ export default function ChessHomeScreen({ navigation }: Props): React.JSX.Elemen
 
           {/* Play vs AI */}
           <TouchableOpacity
-            style={[styles.optionCard, styles.optionDisabled]}
-            accessibilityLabel="Play vs AI — coming soon"
+            style={styles.optionCard}
+            onPress={() => navigation.navigate('ChessAISetup')}
+            accessibilityLabel="Play chess against Claude AI"
           >
             <Text style={styles.optionEmoji}>🤖</Text>
             <View style={styles.optionText}>
               <Text style={styles.optionTitle}>Play vs AI</Text>
-              <Text style={styles.optionDesc}>Claude AI — coming in Step 10</Text>
+              <Text style={styles.optionDesc}>Powered by Claude</Text>
             </View>
             <Text style={styles.optionArrow}>→</Text>
           </TouchableOpacity>
+
 
           {/* Play offline */}
           <TouchableOpacity

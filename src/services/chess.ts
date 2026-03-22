@@ -117,3 +117,14 @@ export const requiresPromotion = (
   return (piece.color === 'w' && toRank === '8') ||
     (piece.color === 'b' && toRank === '1');
 };
+/**
+ * Returns all legal moves for the current position in UCI format.
+ * Used to provide Claude with the list of valid moves to choose from.
+ */
+export const getLegalMovesUCI = (game: Chess): string[] => {
+  const moves = game.moves({ verbose: true });
+  return moves.map((m) => {
+    const promotion = m.promotion ? m.promotion : '';
+    return `${m.from}${m.to}${promotion}`;
+  });
+};

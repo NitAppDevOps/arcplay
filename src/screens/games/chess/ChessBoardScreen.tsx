@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -17,6 +17,7 @@ import {
   createChessGame,
   getGameState,
   getLegalMovesForSquare,
+  getLegalMovesUCI,
   makeMove,
   getPieceSymbol,
   requiresPromotion,
@@ -28,6 +29,7 @@ import {
   updateRoomFen,
   completeRoom,
 } from '@services/rooms';
+import { getChessAIMove, type ChessAIDifficulty } from '@services/claude';
 import type { ChessSquare, ChessPieceType } from '@app-types/game.types';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { GamesStackParamList } from '@app-types/navigation.types';
@@ -47,10 +49,20 @@ const getSquareColour = (file: number, rank: number): string => {
   return isLight ? COLOURS.BOARD_LIGHT : COLOURS.BOARD_DARK;
 };
 
-/** ChessBoardScreen — local and online multiplayer chess */
+/** Formats seconds into mm:ss display */
+const formatTime = (seconds: number): string => {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+/** ChessBoardScreen — local, online multiplayer, and AI with optional timer */
 export default function ChessBoardScreen({ navigation, route }: Props): React.JSX.Element {
-  const { roomId } = route.params;
-  const isOnline = roomId !== 'local';
+  const { roomId, timeControl } = route.params;
+  const isOnline = roomId !== 'local' && !roomId.startsWith('ai_');
+  const isAI = roomId.startsWith('ai_');
+  const aiDifficulty = isAI ? (roomId.replace('ai_', '') as ChessAIDifficulty) : null;
+  const hasTimer = timeControl != null && timeControl > 0;
 
   const { user } = useAuthStore();
   const {
@@ -64,31 +76,109 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
     resetChessGame,
   } = useGameStore();
 
-  const [game, setGame] = useState<Chess>(() => createChessGame());
+  const gameRef = useRef<Chess>(createChessGame());
+  const [, forceUpdate] = useState<number>(0);
   const [showPromotion, setShowPromotion] = useState<boolean>(false);
   const [pendingMove, setPendingMove] = useState<{ from: ChessSquare; to: ChessSquare } | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>('White to move');
   const [myColour, setMyColour] = useState<'w' | 'b'>('w');
   const [isLoadingRoom, setIsLoadingRoom] = useState<boolean>(isOnline);
+  const [isAIThinking, setIsAIThinking] = useState<boolean>(false);
+  const isAIThinkingRef = useRef<boolean>(false);
 
-  /** Initialises the game */
+  // Timer state
+  const [whiteTime, setWhiteTime] = useState<number>(timeControl ?? 0);
+  const [blackTime, setBlackTime] = useState<number>(timeControl ?? 0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const gameStartedRef = useRef<boolean>(false);
+
+  /** Starts the timer for the current player's turn */
+  const startTimer = useCallback((turn: 'w' | 'b'): void => {
+    if (!hasTimer) return;
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = setInterval(() => {
+      if (turn === 'w') {
+        setWhiteTime((prev) => {
+          if (prev <= 1) {
+            clearInterval(timerRef.current!);
+            handleTimeout('w');
+            return 0;
+          }
+          return prev - 1;
+        });
+      } else {
+        setBlackTime((prev) => {
+          if (prev <= 1) {
+            clearInterval(timerRef.current!);
+            handleTimeout('b');
+            return 0;
+          }
+          return prev - 1;
+        });
+      }
+    }, 1000);
+  }, [hasTimer]);
+
+  /** Stops the timer */
+  const stopTimer = useCallback((): void => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  /** Handles a player running out of time */
+  const handleTimeout = useCallback((timedOutColour: 'w' | 'b'): void => {
+    stopTimer();
+    const winner = timedOutColour === 'w' ? 'Black' : 'White';
+    setStatusMessage(`Time out — ${winner} wins!`);
+    if (isOnline) {
+      const winnerId = timedOutColour !== myColour ? user?.id ?? null : null;
+      completeRoom(roomId, winnerId, 'timeout');
+    }
+  }, [isOnline, myColour, user, roomId]);
+
+  /** Cleans up timer on unmount */
+  useEffect(() => {
+    return () => { stopTimer(); };
+  }, []);
+
+  /** Initialises the game on mount */
   useEffect(() => {
     const init = async (): Promise<void> => {
       const newGame = createChessGame();
+      gameRef.current = newGame;
       resetChessGame();
       setChessGameState(getGameState(newGame));
-      setGame(newGame);
+      forceUpdate(n => n + 1);
+      if (hasTimer) {
+        setWhiteTime(timeControl!);
+        setBlackTime(timeControl!);
+      }
+
+      if (isAI) {
+        setMyColour('w');
+        return;
+      }
 
       if (isOnline && user) {
         const { room } = await getRoom(roomId);
         if (room) {
           const isHost = room.host_id === user.id;
-          const colour = isHost ? room.host_colour : (room.host_colour === 'w' ? 'b' : 'w');
+          const colour = isHost
+            ? room.host_colour
+            : (room.host_colour === 'w' ? 'b' : 'w');
           setMyColour(colour);
+          const roomTimeControl = room.time_control;
+          if (roomTimeControl) {
+            setWhiteTime(roomTimeControl);
+            setBlackTime(roomTimeControl);
+          }
           if (room.current_fen !== newGame.fen()) {
             const restoredGame = createChessGame(room.current_fen);
-            setGame(restoredGame);
+            gameRef.current = restoredGame;
             setChessGameState(getGameState(restoredGame));
+            forceUpdate(n => n + 1);
           }
         }
         setIsLoadingRoom(false);
@@ -102,51 +192,126 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
     if (!isOnline) return;
     const subscription = subscribeToMoves(roomId, (moveData) => {
       if (moveData.player_id === user?.id) return;
-      setGame((prevGame) => {
-        const move = makeMove(prevGame, moveData.from_square, moveData.to_square, moveData.promotion ?? 'q');
-        if (!move) return prevGame;
-        addChessMove(move);
-        const newState = getGameState(prevGame);
-        setChessGameState(newState);
-        return createChessGame(newState.fen);
-      });
+      const move = makeMove(
+        gameRef.current,
+        moveData.from_square,
+        moveData.to_square,
+        moveData.promotion ?? 'q'
+      );
+      if (!move) return;
+      addChessMove(move);
+      const newState = getGameState(gameRef.current);
+      setChessGameState(newState);
+      gameRef.current = createChessGame(newState.fen);
+      forceUpdate(n => n + 1);
+      if (hasTimer) startTimer(newState.turn);
     });
     return () => { subscription.unsubscribe(); };
-  }, [isOnline, roomId]);
+  }, [isOnline, roomId, hasTimer]);
 
   /** Updates status message on game state change */
   useEffect(() => {
     if (!chessGameState) return;
-    if (chessGameState.isCheckmate) {
-      const winner = chessGameState.turn === 'w' ? 'Black' : 'White';
-      setStatusMessage(`Checkmate — ${winner} wins!`);
-      if (isOnline) {
-        const winnerId = chessGameState.turn === 'w'
-          ? (myColour === 'b' ? user?.id ?? null : null)
-          : (myColour === 'w' ? user?.id ?? null : null);
-        completeRoom(roomId, winnerId, 'checkmate');
+    if (chessGameState.isGameOver) {
+      stopTimer();
+      if (chessGameState.isCheckmate) {
+        const winner = chessGameState.turn === 'w' ? 'Black' : 'White';
+        setStatusMessage(`Checkmate — ${winner} wins!`);
+        if (isOnline) {
+          const winnerId = chessGameState.turn !== myColour ? user?.id ?? null : null;
+          completeRoom(roomId, winnerId, 'checkmate');
+        }
+      } else if (chessGameState.isStalemate) {
+        setStatusMessage('Stalemate — draw!');
+        if (isOnline) completeRoom(roomId, null, 'stalemate');
+      } else if (chessGameState.isDraw) {
+        setStatusMessage('Draw!');
+        if (isOnline) completeRoom(roomId, null, 'draw');
       }
-    } else if (chessGameState.isStalemate) {
-      setStatusMessage('Stalemate — draw!');
-      if (isOnline) completeRoom(roomId, null, 'stalemate');
-    } else if (chessGameState.isDraw) {
-      setStatusMessage('Draw!');
-      if (isOnline) completeRoom(roomId, null, 'draw');
     } else if (chessGameState.isCheck) {
       const inCheck = chessGameState.turn === 'w' ? 'White' : 'Black';
-      setStatusMessage(`${inCheck} is in check!`);
+      if (isAI) {
+        setStatusMessage(chessGameState.turn === myColour ? `${inCheck} is in check!` : 'AI is in check!');
+      } else {
+        setStatusMessage(`${inCheck} is in check!`);
+      }
     } else {
-      const toMove = chessGameState.turn === 'w' ? 'White' : 'Black';
-      setStatusMessage(isOnline
-        ? chessGameState.turn === myColour ? 'Your turn' : "Opponent's turn"
-        : `${toMove} to move`
-      );
+      if (isAI) {
+        setStatusMessage(chessGameState.turn === myColour ? 'Your turn' : isAIThinkingRef.current ? 'AI is thinking...' : "AI's turn");
+      } else if (isOnline) {
+        setStatusMessage(chessGameState.turn === myColour ? 'Your turn' : "Opponent's turn");
+      } else {
+        setStatusMessage(chessGameState.turn === 'w' ? 'White to move' : 'Black to move');
+      }
     }
   }, [chessGameState]);
 
-  /** Returns true if it is the current user's turn in online mode */
+  /** Executes a move */
+  const executeMove = useCallback(async (
+    from: ChessSquare,
+    to: ChessSquare,
+    promotion: ChessPieceType = 'q'
+  ): Promise<void> => {
+    const move = makeMove(gameRef.current, from, to, promotion);
+    if (!move) return;
+    addChessMove(move);
+    const newState = getGameState(gameRef.current);
+    setChessGameState(newState);
+    setSelectedSquare(null);
+    setLegalMoves([]);
+    gameRef.current = createChessGame(newState.fen);
+    forceUpdate(n => n + 1);
+
+    // Start timer for next player
+    if (hasTimer && !newState.isGameOver) {
+      if (!gameStartedRef.current) gameStartedRef.current = true;
+      startTimer(newState.turn);
+    }
+
+    if (isOnline && user) {
+      const moveNumber = (chessGameState?.moveCount ?? 0) + 1;
+      await saveMove(roomId, user.id, move, moveNumber);
+      await updateRoomFen(roomId, newState.fen);
+    }
+  }, [chessGameState, isOnline, user, roomId, hasTimer, startTimer]);
+
+  /** Triggers AI move after player moves */
+  useEffect(() => {
+    if (!isAI || !chessGameState || chessGameState.isGameOver) return;
+    if (chessGameState.turn === myColour) return;
+    if (isAIThinkingRef.current) return;
+
+    const triggerAIMove = async (): Promise<void> => {
+      isAIThinkingRef.current = true;
+      setIsAIThinking(true);
+      setStatusMessage('AI is thinking...');
+      try {
+        const legalMoves = getLegalMovesUCI(gameRef.current);
+        if (legalMoves.length === 0) return;
+        const { move } = await getChessAIMove(chessGameState.fen, aiDifficulty!, legalMoves);
+        const moveToPlay = (move && move.length >= 4) ? move : legalMoves[0];
+        const from = moveToPlay.slice(0, 2) as ChessSquare;
+        const to = moveToPlay.slice(2, 4) as ChessSquare;
+        const promotion = moveToPlay.length === 5 ? moveToPlay[4] as ChessPieceType : 'q';
+        await executeMove(from, to, promotion);
+      } catch {
+        const legalMoves = getLegalMovesUCI(gameRef.current);
+        if (legalMoves.length > 0) {
+          const fallback = legalMoves[0];
+          await executeMove(fallback.slice(0, 2) as ChessSquare, fallback.slice(2, 4) as ChessSquare, 'q');
+        }
+      } finally {
+        isAIThinkingRef.current = false;
+        setIsAIThinking(false);
+      }
+    };
+
+    triggerAIMove();
+  }, [chessGameState?.fen]);
+
   const isMyTurn = (): boolean => {
-    if (!isOnline) return true;
+    if (!isOnline && !isAI) return true;
+    if (isAI) return chessGameState?.turn === myColour && !isAIThinkingRef.current;
     return chessGameState?.turn === myColour;
   };
 
@@ -162,7 +327,7 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
         return;
       }
       if (legalMovesForSelected.includes(square)) {
-        if (requiresPromotion(selectedSquare, square, game)) {
+        if (requiresPromotion(selectedSquare, square, gameRef.current)) {
           setPendingMove({ from: selectedSquare, to: square });
           setShowPromotion(true);
           return;
@@ -170,10 +335,10 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
         executeMove(selectedSquare, square);
         return;
       }
-      const piece = game.get(square as any);
+      const piece = gameRef.current.get(square as any);
       if (piece && piece.color === chessGameState?.turn) {
         setSelectedSquare(square);
-        setLegalMoves(getLegalMovesForSquare(game, square));
+        setLegalMoves(getLegalMovesForSquare(gameRef.current, square));
         return;
       }
       setSelectedSquare(null);
@@ -181,38 +346,14 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
       return;
     }
 
-    const piece = game.get(square as any);
+    const piece = gameRef.current.get(square as any);
     if (piece && piece.color === chessGameState?.turn) {
       setSelectedSquare(square);
-      setLegalMoves(getLegalMovesForSquare(game, square));
+      setLegalMoves(getLegalMovesForSquare(gameRef.current, square));
     }
-  }, [selectedSquare, legalMovesForSelected, game, chessGameState, myColour]);
+  }, [selectedSquare, legalMovesForSelected, chessGameState, myColour, isAIThinking]);
 
-  /** Executes a move locally and syncs to Supabase in online mode */
-  const executeMove = useCallback(async (
-    from: ChessSquare,
-    to: ChessSquare,
-    promotion: ChessPieceType = 'q'
-  ): Promise<void> => {
-    const move = makeMove(game, from, to, promotion);
-    if (!move) return;
-
-    addChessMove(move);
-    const newState = getGameState(game);
-    setChessGameState(newState);
-    setSelectedSquare(null);
-    setLegalMoves([]);
-    const newGame = createChessGame(newState.fen);
-    setGame(newGame);
-
-    if (isOnline && user) {
-      const moveNumber = (chessGameState?.moveCount ?? 0) + 1;
-      await saveMove(roomId, user.id, move, moveNumber);
-      await updateRoomFen(roomId, newState.fen);
-    }
-  }, [game, chessGameState, isOnline, user, roomId]);
-
-  /** Handles promotion piece selection */
+  /** Handles promotion selection */
   const handlePromotion = useCallback((piece: ChessPieceType): void => {
     if (!pendingMove) return;
     setShowPromotion(false);
@@ -220,21 +361,30 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
     setPendingMove(null);
   }, [pendingMove, executeMove]);
 
-  /** Resets the game — local only */
+  /** Resets the game */
   const handleNewGame = (): void => {
     if (isOnline) return;
+    stopTimer();
     const newGame = createChessGame();
-    setGame(newGame);
+    gameRef.current = newGame;
     resetChessGame();
     setChessGameState(getGameState(newGame));
+    setIsAIThinking(false);
+    isAIThinkingRef.current = false;
+    gameStartedRef.current = false;
+    if (hasTimer) {
+      setWhiteTime(timeControl!);
+      setBlackTime(timeControl!);
+    }
+    forceUpdate(n => n + 1);
   };
 
-  /** Renders a single board square */
+  /** Renders a single square */
   const renderSquare = (fileIdx: number, rankIdx: number): React.JSX.Element => {
     const FILES = myColour === 'b' ? FILES_BLACK : FILES_WHITE;
     const RANKS = myColour === 'b' ? RANKS_BLACK : RANKS_WHITE;
     const square = `${FILES[fileIdx]}${RANKS[rankIdx]}` as ChessSquare;
-    const piece = game.get(square as any);
+    const piece = gameRef.current.get(square as any);
     const isSelected = selectedSquare === square;
     const isLegalMove = legalMovesForSelected.includes(square);
     const bgColour = getSquareColour(fileIdx, rankIdx);
@@ -242,26 +392,16 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
     return (
       <TouchableOpacity
         key={square}
-        style={[
-          styles.square,
-          { backgroundColor: bgColour },
-          isSelected && styles.squareSelected,
-        ]}
+        style={[styles.square, { backgroundColor: bgColour }, isSelected && styles.squareSelected]}
         onPress={() => handleSquareTap(square)}
         accessibilityLabel={`Square ${square}`}
         activeOpacity={0.8}
       >
         {isLegalMove && (
-          <View style={[
-            styles.legalDot,
-            piece ? styles.legalCapture : styles.legalMove,
-          ]} />
+          <View style={[styles.legalDot, piece ? styles.legalCapture : styles.legalMove]} />
         )}
         {piece && (
-          <Text style={[
-            styles.piece,
-            piece.color === 'w' ? styles.whitePiece : styles.blackPiece,
-          ]}>
+          <Text style={[styles.piece, piece.color === 'w' ? styles.whitePiece : styles.blackPiece]}>
             {getPieceSymbol(piece.type, piece.color)}
           </Text>
         )}
@@ -279,6 +419,12 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
     );
   };
 
+  /** Returns timer colour — red when under 10 seconds */
+  const timerColour = (seconds: number): string =>
+    seconds <= 10 && seconds > 0 ? COLOURS.ERROR : COLOURS.TEXT_PRIMARY;
+
+  const opponentColour = myColour === 'w' ? 'b' : 'w';
+
   if (isLoadingRoom) {
     return (
       <SafeAreaView style={styles.container}>
@@ -295,58 +441,88 @@ export default function ChessBoardScreen({ navigation, route }: Props): React.JS
       <ScrollView contentContainerStyle={styles.scroll}>
 
         <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            accessibilityLabel="Go back"
-            style={styles.backBtn}
-          >
+          <TouchableOpacity onPress={() => navigation.goBack()} accessibilityLabel="Go back" style={styles.backBtn}>
             <Text style={styles.backText}>← Back</Text>
           </TouchableOpacity>
           <Text style={styles.title}>
-            {isOnline ? `Room ${roomId}` : 'Chess'}
+            {isAI ? `vs AI (${aiDifficulty})` : isOnline ? `Room ${roomId}` : 'Chess'}
           </Text>
           {!isOnline && (
-            <TouchableOpacity
-              onPress={handleNewGame}
-              accessibilityLabel="New game"
-              style={styles.newGameBtn}
-            >
+            <TouchableOpacity onPress={handleNewGame} accessibilityLabel="New game" style={styles.newGameBtn}>
               <Text style={styles.newGameText}>New</Text>
             </TouchableOpacity>
           )}
         </View>
 
+        {/* Opponent timer */}
+        {hasTimer && (
+          <View style={[styles.timerRow, styles.timerRowOpponent]}>
+            <Text style={styles.timerLabel}>
+              {isAI ? 'AI' : isOnline ? 'Opponent' : opponentColour === 'w' ? 'White' : 'Black'}
+            </Text>
+            <View style={[
+              styles.timerBox,
+              chessGameState?.turn === opponentColour && !chessGameState?.isGameOver && styles.timerBoxActive,
+            ]}>
+              <Text style={[
+                styles.timerText,
+                { color: timerColour(opponentColour === 'w' ? whiteTime : blackTime) },
+              ]}>
+                {formatTime(opponentColour === 'w' ? whiteTime : blackTime)}
+              </Text>
+            </View>
+          </View>
+        )}
+
         <View style={[
           styles.statusBar,
           chessGameState?.isGameOver && styles.statusBarGameOver,
           chessGameState?.isCheck && !chessGameState?.isGameOver && styles.statusBarCheck,
+          isAIThinking && styles.statusBarThinking,
         ]}>
+          {isAIThinking && <ActivityIndicator size="small" color={COLOURS.PRIMARY} style={styles.thinkingIndicator} />}
           <Text style={styles.statusText}>{statusMessage}</Text>
         </View>
 
         <View style={styles.capturedRow}>
           {chessGameState?.capturedByWhite.map((p, i) => (
-            <Text key={i} style={styles.capturedPiece}>
-              {getPieceSymbol(p.type, p.color)}
-            </Text>
+            <Text key={i} style={styles.capturedPiece}>{getPieceSymbol(p.type, p.color)}</Text>
           ))}
         </View>
 
         <View style={styles.board}>
           {(myColour === 'b' ? RANKS_BLACK : RANKS_WHITE).map((_, rankIdx) => (
             <View key={rankIdx} style={styles.boardRow}>
-              {(myColour === 'b' ? FILES_BLACK : FILES_WHITE).map((_, fileIdx) => renderSquare(fileIdx, rankIdx))}
+              {(myColour === 'b' ? FILES_BLACK : FILES_WHITE).map((_, fileIdx) =>
+                renderSquare(fileIdx, rankIdx)
+              )}
             </View>
           ))}
         </View>
 
         <View style={styles.capturedRow}>
           {chessGameState?.capturedByBlack.map((p, i) => (
-            <Text key={i} style={styles.capturedPiece}>
-              {getPieceSymbol(p.type, p.color)}
-            </Text>
+            <Text key={i} style={styles.capturedPiece}>{getPieceSymbol(p.type, p.color)}</Text>
           ))}
         </View>
+
+        {/* My timer */}
+        {hasTimer && (
+          <View style={styles.timerRow}>
+            <Text style={styles.timerLabel}>You</Text>
+            <View style={[
+              styles.timerBox,
+              chessGameState?.turn === myColour && !chessGameState?.isGameOver && styles.timerBoxActive,
+            ]}>
+              <Text style={[
+                styles.timerText,
+                { color: timerColour(myColour === 'w' ? whiteTime : blackTime) },
+              ]}>
+                {formatTime(myColour === 'w' ? whiteTime : blackTime)}
+              </Text>
+            </View>
+          </View>
+        )}
 
         <View style={styles.moveHistory}>
           <Text style={styles.moveHistoryTitle}>Moves</Text>
@@ -402,13 +578,30 @@ const styles = StyleSheet.create({
   backBtn: { paddingVertical: 4, paddingRight: 16 },
   backText: { color: COLOURS.TEXT_SECONDARY, fontSize: 15 },
   title: { color: COLOURS.TEXT_PRIMARY, fontSize: 18, fontWeight: '700' },
-  newGameBtn: {
-    backgroundColor: COLOURS.PRIMARY,
+  newGameBtn: { backgroundColor: COLOURS.PRIMARY, paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8 },
+  newGameText: { color: COLOURS.TEXT_PRIMARY, fontSize: 13, fontWeight: '600' },
+  timerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    paddingHorizontal: 16,
+    gap: 10,
+    marginBottom: 4,
+  },
+  timerRowOpponent: { marginBottom: 0, marginTop: 4 },
+  timerLabel: { color: COLOURS.TEXT_MUTED, fontSize: 12 },
+  timerBox: {
+    backgroundColor: COLOURS.SURFACE,
+    borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLOURS.BORDER,
+    minWidth: 72,
+    alignItems: 'center',
   },
-  newGameText: { color: COLOURS.TEXT_PRIMARY, fontSize: 13, fontWeight: '600' },
+  timerBoxActive: { borderColor: COLOURS.PRIMARY, backgroundColor: COLOURS.SURFACE_ELEVATED },
+  timerText: { fontSize: 20, fontWeight: '700', fontFamily: 'monospace' },
   statusBar: {
     marginHorizontal: 16,
     marginBottom: 8,
@@ -418,17 +611,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderWidth: 1,
     borderColor: COLOURS.BORDER,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
   },
   statusBarCheck: { borderColor: COLOURS.WARNING, backgroundColor: COLOURS.SURFACE_ELEVATED },
   statusBarGameOver: { borderColor: COLOURS.PRIMARY, backgroundColor: COLOURS.SURFACE_ELEVATED },
+  statusBarThinking: { borderColor: COLOURS.PRIMARY },
+  thinkingIndicator: { marginRight: 4 },
   statusText: { color: COLOURS.TEXT_PRIMARY, fontSize: 14, fontWeight: '600', textAlign: 'center' },
-  capturedRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    paddingHorizontal: 16,
-    minHeight: 24,
-    marginBottom: 4,
-  },
+  capturedRow: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 16, minHeight: 24, marginBottom: 4 },
   capturedPiece: { fontSize: 16 },
   board: {
     width: BOARD_SIZE,

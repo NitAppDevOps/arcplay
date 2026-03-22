@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Share,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -13,48 +14,51 @@ import type { GamesStackParamList } from '@app-types/navigation.types';
 import { COLOURS } from '@constants/colours';
 import { useAuthStore } from '@store/authStore';
 import { createRoom } from '@services/rooms';
+import { TIME_CONTROLS, type ITimeControl } from '@app-types/game.types';
 
 type Props = NativeStackScreenProps<GamesStackParamList, 'ChessCreateRoom'>;
 
-/** ChessCreateRoomScreen — creates a private room and shows shareable code */
+/** ChessCreateRoomScreen — creates a private room with time control selection */
 export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.Element {
   const { user } = useAuthStore();
   const [roomId, setRoomId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string>('');
+  const [errorMsg, setErrorMsg] = useState<string>('');
+  const [selectedTimeControl, setSelectedTimeControl] = useState<ITimeControl>(TIME_CONTROLS[0]);
 
   /** Creates a new room in Supabase */
   const handleCreateRoom = async (): Promise<void> => {
     if (!user) return;
     setIsLoading(true);
-    setError('');
+    setErrorMsg('');
     try {
-      const { roomId: newRoomId, error: createError } = await createRoom(user.id);
+      const { roomId: newRoomId, error: createError } = await createRoom(
+        user.id,
+        selectedTimeControl.seconds
+      );
       if (createError || !newRoomId) {
-        setError(createError ?? 'Failed to create room.');
+        setErrorMsg(createError ?? 'Failed to create room.');
         return;
       }
       setRoomId(newRoomId);
     } catch {
-      setError('An unexpected error occurred.');
+      setErrorMsg('An unexpected error occurred.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  /** Shares the room code via native share sheet */
+  /** Shares the room code */
   const handleShare = async (): Promise<void> => {
     if (!roomId) return;
     try {
       await Share.share({
         message: `Join my ARCPLAY chess game! Room code: ${roomId}`,
       });
-    } catch {
-      // User dismissed share sheet — no action needed
-    }
+    } catch { }
   };
 
-  /** Navigates to the room lobby */
+  /** Navigates to lobby */
   const handleEnterLobby = (): void => {
     if (!roomId) return;
     navigation.navigate('ChessRoomLobby', { roomId });
@@ -62,9 +66,8 @@ export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.inner}>
+      <ScrollView contentContainerStyle={styles.scroll}>
 
-        {/* Header */}
         <TouchableOpacity
           style={styles.back}
           onPress={() => navigation.goBack()}
@@ -75,19 +78,41 @@ export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.
 
         <Text style={styles.title}>Create a room</Text>
         <Text style={styles.subtitle}>
-          Generate a room code and share it with a friend. They enter the code
-          to join your game.
+          Generate a room code and share it with a friend.
         </Text>
 
-        {/* Room code display */}
+        {!roomId && (
+          <>
+            <Text style={styles.sectionTitle}>Time control</Text>
+            <View style={styles.timeControls}>
+              {TIME_CONTROLS.map((tc) => {
+                const isSelected = selectedTimeControl.label === tc.label;
+                return (
+                  <TouchableOpacity
+                    key={tc.label}
+                    style={[styles.tcOption, isSelected && styles.tcOptionSelected]}
+                    onPress={() => setSelectedTimeControl(tc)}
+                    accessibilityLabel={`Select ${tc.label}`}
+                  >
+                    <Text style={[styles.tcLabel, isSelected && styles.tcLabelSelected]}>
+                      {tc.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </>
+        )}
+
         {roomId ? (
           <View style={styles.codeContainer}>
             <Text style={styles.codeLabel}>Your room code</Text>
             <Text style={styles.code}>{roomId}</Text>
             <Text style={styles.codeHint}>
-              Share this code with your opponent
+              {selectedTimeControl.seconds
+                ? `${selectedTimeControl.label} · Share with your opponent`
+                : 'Unlimited time · Share with your opponent'}
             </Text>
-
             <TouchableOpacity
               style={styles.shareBtn}
               onPress={handleShare}
@@ -95,7 +120,6 @@ export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.
             >
               <Text style={styles.shareBtnText}>Share code</Text>
             </TouchableOpacity>
-
             <TouchableOpacity
               style={styles.lobbyBtn}
               onPress={handleEnterLobby}
@@ -105,16 +129,8 @@ export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.
             </TouchableOpacity>
           </View>
         ) : (
-          <View style={styles.createContainer}>
-            <View style={styles.infoBox}>
-              <Text style={styles.infoItem}>♟  Chess — 2 players</Text>
-              <Text style={styles.infoItem}>🌐  Online multiplayer</Text>
-              <Text style={styles.infoItem}>⚡  Real-time sync</Text>
-              <Text style={styles.infoItem}>🎨  Colour assigned randomly</Text>
-            </View>
-
-            {error ? <Text style={styles.error}>{error}</Text> : null}
-
+          <>
+            {errorMsg ? <Text style={styles.errorText}>{errorMsg}</Text> : null}
             <TouchableOpacity
               style={[styles.createBtn, isLoading && styles.createBtnDisabled]}
               onPress={handleCreateRoom}
@@ -127,43 +143,43 @@ export default function ChessCreateRoomScreen({ navigation }: Props): React.JSX.
                 <Text style={styles.createBtnText}>Create room</Text>
               )}
             </TouchableOpacity>
-          </View>
+          </>
         )}
 
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLOURS.BACKGROUND,
-  },
-  inner: {
-    flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    gap: 20,
-  },
-  back: {
-    alignSelf: 'flex-start',
-    paddingVertical: 8,
-  },
-  backText: {
+  container: { flex: 1, backgroundColor: COLOURS.BACKGROUND },
+  scroll: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 40, gap: 20 },
+  back: { alignSelf: 'flex-start', paddingVertical: 8 },
+  backText: { color: COLOURS.TEXT_SECONDARY, fontSize: 15 },
+  title: { color: COLOURS.TEXT_PRIMARY, fontSize: 28, fontWeight: '700' },
+  subtitle: { color: COLOURS.TEXT_SECONDARY, fontSize: 14, lineHeight: 22 },
+  sectionTitle: {
     color: COLOURS.TEXT_SECONDARY,
-    fontSize: 15,
+    fontSize: 13,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
-  title: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 28,
-    fontWeight: '700',
+  timeControls: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  tcOption: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: COLOURS.SURFACE,
+    borderWidth: 1,
+    borderColor: COLOURS.BORDER,
   },
-  subtitle: {
-    color: COLOURS.TEXT_SECONDARY,
-    fontSize: 14,
-    lineHeight: 22,
+  tcOptionSelected: {
+    borderColor: COLOURS.PRIMARY,
+    backgroundColor: COLOURS.SURFACE_ELEVATED,
   },
+  tcLabel: { color: COLOURS.TEXT_SECONDARY, fontSize: 13, fontWeight: '500' },
+  tcLabelSelected: { color: COLOURS.PRIMARY, fontWeight: '700' },
   codeContainer: {
     alignItems: 'center',
     backgroundColor: COLOURS.SURFACE,
@@ -180,16 +196,8 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 1,
   },
-  code: {
-    color: COLOURS.PRIMARY,
-    fontSize: 48,
-    fontWeight: '800',
-    letterSpacing: 8,
-  },
-  codeHint: {
-    color: COLOURS.TEXT_MUTED,
-    fontSize: 12,
-  },
+  code: { color: COLOURS.PRIMARY, fontSize: 48, fontWeight: '800', letterSpacing: 8 },
+  codeHint: { color: COLOURS.TEXT_MUTED, fontSize: 12, textAlign: 'center' },
   shareBtn: {
     backgroundColor: COLOURS.SURFACE_ELEVATED,
     paddingHorizontal: 24,
@@ -200,11 +208,7 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
   },
-  shareBtnText: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 15,
-    fontWeight: '600',
-  },
+  shareBtnText: { color: COLOURS.TEXT_PRIMARY, fontSize: 15, fontWeight: '600' },
   lobbyBtn: {
     backgroundColor: COLOURS.PRIMARY,
     paddingHorizontal: 24,
@@ -213,43 +217,14 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
   },
-  lobbyBtnText: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  createContainer: {
-    gap: 20,
-  },
-  infoBox: {
-    backgroundColor: COLOURS.SURFACE,
-    borderRadius: 16,
-    padding: 20,
-    gap: 12,
-    borderWidth: 1,
-    borderColor: COLOURS.BORDER,
-  },
-  infoItem: {
-    color: COLOURS.TEXT_SECONDARY,
-    fontSize: 14,
-  },
-  error: {
-    color: COLOURS.ERROR,
-    fontSize: 13,
-    textAlign: 'center',
-  },
+  lobbyBtnText: { color: COLOURS.TEXT_PRIMARY, fontSize: 16, fontWeight: '700' },
+  errorText: { color: COLOURS.ERROR, fontSize: 13, textAlign: 'center' },
   createBtn: {
     backgroundColor: COLOURS.PRIMARY,
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
   },
-  createBtnDisabled: {
-    backgroundColor: COLOURS.SURFACE_ELEVATED,
-  },
-  createBtnText: {
-    color: COLOURS.TEXT_PRIMARY,
-    fontSize: 16,
-    fontWeight: '700',
-  },
+  createBtnDisabled: { backgroundColor: COLOURS.SURFACE_ELEVATED },
+  createBtnText: { color: COLOURS.TEXT_PRIMARY, fontSize: 16, fontWeight: '700' },
 });
