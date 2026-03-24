@@ -82,6 +82,7 @@ export interface IRummyCard {
   rank: Rank;
   isJoker: boolean;
   points: number;       // point value if unmelded at declaration
+  droppedBy?: string;   // player name who discarded this card (set on discard, shown in pile modal)
 }
 
 /** A meld — sequence or set */
@@ -96,7 +97,7 @@ export interface IMeld {
 }
 
 /** Rummy game variants */
-export type RummyVariant = 'points' | 'deals' | 'pool101' | 'pool201';
+export type RummyVariant = 'points' | 'deals' | 'pool';
 
 /** A single player's state in the game */
 export interface IRummyPlayer {
@@ -119,7 +120,7 @@ export interface IRummyGameState {
   currentPlayerIndex: number;
   jokerCard: IRummyCard | null; // the open joker for this game
   phase: 'dealing' | 'playing' | 'declaring' | 'scoring' | 'finished';
-  turnPhase: 'draw' | 'discard'; // within a turn
+  turnPhase: 'draw' | 'discard' | 'showing' | 'round_ended'; // within a turn
   dealNumber: number;          // for deals rummy
   totalDeals: number;          // for deals rummy
   winner: string | null;

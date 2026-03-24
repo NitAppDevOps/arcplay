@@ -18,21 +18,44 @@ const RANK_ORDER: Record<Rank, number> = {
   '8': 8, '9': 9, '10': 10, J: 11, Q: 12, K: 13,
 };
 
+/** Ace treated as 14 — used to validate Q-K-A sequences */
+const RANK_ORDER_HIGH_ACE: Record<Rank, number> = {
+  ...RANK_ORDER,
+  A: 14,
+};
+
 const POINT_VALUES: Record<Rank, number> = {
   A: 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7,
   '8': 8, '9': 9, '10': 10, J: 10, Q: 10, K: 10,
 };
 
+// ─── Config types ─────────────────────────────────────────────────────────────
+
+/** Timer expiry behaviour when a player runs out of turn time */
+export type TimerExpiryAction = 'auto_discard' | 'auto_drop' | 'warning_only';
+
+/** Whether the open joker is revealed to all or hidden until pure sequence formed */
+export type JokerType = 'open' | 'closed';
+
+/** Declaration validation rule */
+export type DeclarationRule = 'strict';
+
 /** Host-configurable Rummy room settings */
 export interface IRummyConfig {
   variant: RummyVariant;
-  poolSize: number;           // elimination threshold (101 or 201 for pool)
-  firstScootPoints: number;   // points for dropping before drawing (default 20)
-  midScootPoints: number;     // points for dropping after drawing (default 40)
-  fullHandPoints: number;     // max points if no melds on declaration (default 80)
-  maxConsecutiveScoots: number; // max consecutive scoots allowed (default 3)
-  totalDeals: number;         // number of deals for Deals Rummy (default 3)
-  playerCount: number;        // 2-6 players
+  poolSize: number;               // elimination threshold — configurable by host
+  firstScootPoints: number;       // points for dropping before drawing (default 20)
+  midScootPoints: number;         // points for dropping after drawing (default 40)
+  fullHandPoints: number;         // max points if no melds on declaration (default 80)
+  maxConsecutiveScoots: number;   // max consecutive scoots allowed (default 3)
+  totalDeals: number;             // number of deals for Deals Rummy (default 3)
+  playerCount: number;            // 2-6 players
+  turnTimerSeconds: number | null;         // seconds per turn; null = unlimited
+  timerExpiryAction: TimerExpiryAction;   // what happens when timer runs out
+  jokerType: JokerType;                   // open = visible to all; closed = hidden until pure sequence
+  allowJokerFromDiscard: boolean;         // can a player pick up a discarded joker
+  declarationRule: DeclarationRule;       // strict = Pure Life + Second Life mandatory
+  showTimeSeconds: number;                // seconds for all players to arrange melds after declaration (default 90)
 }
 
 /** Default config — used until host customises */
@@ -45,6 +68,80 @@ export const DEFAULT_RUMMY_CONFIG: IRummyConfig = {
   maxConsecutiveScoots: 3,
   totalDeals: 3,
   playerCount: 2,
+  turnTimerSeconds: null,
+  timerExpiryAction: 'auto_discard',
+  jokerType: 'open',
+  allowJokerFromDiscard: false,
+  declarationRule: 'strict',
+  showTimeSeconds: 90,
+};
+
+// ─── Meld label ───────────────────────────────────────────────────────────────
+
+/** Result of classifying a card group */
+export interface IMeldLabelResult {
+  label: string;
+  type: 'pure_life' | 'second_life' | 'set' | 'invalid' | 'none';
+  color: string;
+}
+
+/**
+ * Classifies a card group and returns a display label.
+ * Pure Life = pure sequence (no jokers).
+ * Second Life = sequence with joker(s).
+ * Set = same rank, different suits.
+ */
+export const getMeldLabel = (cards: IRummyCard[]): IMeldLabelResult => {
+  if (cards.length < 2) {
+    return { label: '', type: 'none', color: 'transparent' };
+  }
+  if (cards.length >= 3 && isPureSequence(cards)) {
+    return { label: 'Pure Life', type: 'pure_life', color: '#D4AF37' };
+  }
+  if (cards.length >= 3 && isValidSequence(cards)) {
+    return { label: 'Second Life', type: 'second_life', color: '#00BCD4' };
+  }
+  if (cards.length >= 3 && isValidSet(cards)) {
+    return { label: 'Set', type: 'set', color: '#9C27B0' };
+  }
+  return { label: 'Invalid', type: 'invalid', color: '#EF4444' };
+};
+
+// ─── Joker from discard ───────────────────────────────────────────────────────
+
+/**
+ * Checks if a discarded joker card can be picked up by the current player.
+ * Rule: a joker from the discard pile can only be taken if it can form
+ * a pure sequence (3+ card sequence with no wildcards) with cards in hand.
+ * The joker is treated as its natural rank (not as a wild card) for this check.
+ */
+export const canPickJokerFromDiscard = (
+  jokerCard: IRummyCard,
+  hand: IRummyCard[]
+): boolean => {
+  // Treat the joker as its natural rank (not wild)
+  const naturalCard: IRummyCard = { ...jokerCard, isJoker: false };
+  // Only pair with non-joker hand cards
+  const naturalHand = hand.filter(c => !c.isJoker);
+
+  for (let i = 0; i < naturalHand.length; i++) {
+    for (let j = i + 1; j < naturalHand.length; j++) {
+      if (isPureSequence([naturalCard, naturalHand[i], naturalHand[j]])) {
+        return true;
+      }
+    }
+  }
+  // Also check 4-card pure sequences with 3 hand cards
+  for (let i = 0; i < naturalHand.length; i++) {
+    for (let j = i + 1; j < naturalHand.length; j++) {
+      for (let k = j + 1; k < naturalHand.length; k++) {
+        if (isPureSequence([naturalCard, naturalHand[i], naturalHand[j], naturalHand[k]])) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 };
 
 // ─── Card creation ────────────────────────────────────────────────────────────
@@ -265,7 +362,9 @@ export const scoot = (
 
 // ─── Meld validation ──────────────────────────────────────────────────────────
 
-/** Checks if a group of cards forms a valid sequence */
+/** Checks if a group of cards forms a valid sequence.
+ *  Supports Q-K-A (Ace treated as high = 14).
+ *  K-A-2 is NOT valid — Ace cannot wrap around. */
 export const isValidSequence = (cards: IRummyCard[]): boolean => {
   if (cards.length < 3) return false;
 
@@ -278,18 +377,31 @@ export const isValidSequence = (cards: IRummyCard[]): boolean => {
   const suit = nonJokers[0].suit;
   if (!nonJokers.every(c => c.suit === suit)) return false;
 
-  // Sort by rank order
-  const sorted = [...nonJokers].sort((a, b) => RANK_ORDER[a.rank] - RANK_ORDER[b.rank]);
+  const hasAce = nonJokers.some(c => c.rank === 'A');
 
-  // Count gaps — each gap needs a joker to fill
-  let gapsNeeded = 0;
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const gap = RANK_ORDER[sorted[i + 1].rank] - RANK_ORDER[sorted[i].rank] - 1;
-    if (gap < 0) return false; // duplicate ranks
-    gapsNeeded += gap;
+  /** Count gaps needed for a given rank ordering — returns -1 if duplicates */
+  const countGaps = (order: Record<Rank, number>): number => {
+    const sorted = [...nonJokers].sort((a, b) => order[a.rank] - order[b.rank]);
+    let gaps = 0;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const gap = order[sorted[i + 1].rank] - order[sorted[i].rank] - 1;
+      if (gap < 0) return -1; // duplicate ranks
+      gaps += gap;
+    }
+    return gaps;
+  };
+
+  // Try Ace as low (1) first — covers A-2-3 etc.
+  const gapsLow = countGaps(RANK_ORDER);
+  if (gapsLow >= 0 && gapsLow <= jokerCount) return true;
+
+  // Try Ace as high (14) — covers Q-K-A
+  if (hasAce) {
+    const gapsHigh = countGaps(RANK_ORDER_HIGH_ACE);
+    if (gapsHigh >= 0 && gapsHigh <= jokerCount) return true;
   }
 
-  return gapsNeeded <= jokerCount;
+  return false;
 };
 
 /** Checks if a group of cards forms a valid set */
@@ -308,16 +420,28 @@ export const isValidSet = (cards: IRummyCard[]): boolean => {
   return new Set(suits).size === suits.length;
 };
 
-/** Checks if a sequence is pure (no jokers) */
+/** Checks if a sequence is pure (no printed jokers).
+ *  Wild-joker-rank cards (isJoker=true but id doesn't start with 'joker_') are
+ *  allowed in a pure sequence because they can play as their natural rank.
+ *  Only printed jokers (id starts with 'joker_') are permanently wild. */
 export const isPureSequence = (cards: IRummyCard[]): boolean => {
-  if (!isValidSequence(cards)) return false;
-  return cards.every(c => !c.isJoker);
+  if (cards.length < 3) return false;
+  // Any printed joker disqualifies the sequence from being pure
+  if (cards.some(c => c.id.startsWith('joker_'))) return false;
+  // Treat all remaining cards as their natural rank (ignore isJoker flag)
+  const asNatural = cards.map(c => ({ ...c, isJoker: false }));
+  return isValidSequence(asNatural);
 };
 
-/** Validates a full hand declaration */
+/**
+ * Validates a full hand declaration.
+ * Strict rule: requires at least 1 Pure Life (pure sequence) and
+ * at least 1 Second Life (any sequence, with or without joker).
+ */
 export const validateDeclaration = (
   hand: IRummyCard[],
-  melds: IMeld[]
+  melds: IMeld[],
+  _config?: IRummyConfig
 ): { isValid: boolean; reason: string } => {
   // All cards must be in melds
   const meldsCardIds = new Set(melds.flatMap(m => m.cards.map(c => c.id)));
@@ -334,16 +458,24 @@ export const validateDeclaration = (
     return { isValid: false, reason: 'One or more melds are invalid.' };
   }
 
-  // Must have at least 2 sequences
   const sequences = melds.filter(m => m.type === 'sequence');
-  if (sequences.length < 2) {
-    return { isValid: false, reason: 'You need at least 2 sequences to declare.' };
+
+  // Must have at least 1 Pure Life (pure sequence — no jokers)
+  const pureLifeCount = sequences.filter(m => isPureSequence(m.cards)).length;
+  if (pureLifeCount < 1) {
+    return {
+      isValid: false,
+      reason: 'You need at least 1 Pure Life — a sequence with no jokers.',
+    };
   }
 
-  // Must have at least 1 pure sequence (no jokers)
-  const hasPure = sequences.some(m => isPureSequence(m.cards));
-  if (!hasPure) {
-    return { isValid: false, reason: 'You need at least 1 pure sequence (no jokers).' };
+  // Must have at least 1 Second Life (any sequence, including the pure one doesn't count twice)
+  // We need at least 2 sequences total: one pure + one additional
+  if (sequences.length < 2) {
+    return {
+      isValid: false,
+      reason: 'You need a Second Life — a second sequence (with or without joker).',
+    };
   }
 
   return { isValid: true, reason: 'Valid declaration!' };

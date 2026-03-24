@@ -30,6 +30,10 @@ export const COLOURS = {
   // Borders
   BORDER: '#2A2A3E',
   BORDER_LIGHT: '#3A3A54',
+  BORDER_STRONG: '#333345',
+
+  // Text on coloured backgrounds
+  TEXT_ON_PRIMARY: '#0A0A0F',
 
   // Overlays
   OVERLAY: 'rgba(0,0,0,0.6)',

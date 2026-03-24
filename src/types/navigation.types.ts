@@ -40,7 +40,7 @@ export type GamesStackParamList = {
   ChessHome: undefined;
   ChessCreateRoom: undefined;
   ChessRoomLobby: { roomId: string };
-  ChessBoard: { roomId: string };
+  ChessBoard: { roomId: string; timeControl?: number | null };
   ChessPostGame: { gameId: string };
   ChessMoveReplay: { gameId: string };
   ChessAISetup: undefined;
@@ -50,7 +50,7 @@ export type GamesStackParamList = {
   RummyVariantSelect: undefined;
   RummyCreateRoom: undefined;
   RummyRoomLobby: { roomId: string };
-  RummyTable: { roomId: string };
+  RummyTable: { roomId: string; mode?: 'local' | 'online'; playerIndex?: number };
   RummyMeldDiscard: { roomId: string };
   RummyDeclaration: { roomId: string };
   RummyPostGame: { gameId: string };

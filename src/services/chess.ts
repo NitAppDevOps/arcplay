@@ -1,4 +1,4 @@
-import { Chess } from 'chess.js';
+import { Chess, type Square } from 'chess.js';
 import type {
   IChessGameState,
   IChessMove,
@@ -56,8 +56,8 @@ export const getLegalMovesForSquare = (
   game: Chess,
   square: ChessSquare
 ): ChessSquare[] => {
-  const moves = game.moves({ square, verbose: true });
-  return moves.map((m) => m.to);
+  const moves = game.moves({ square: square as Square, verbose: true });
+  return moves.map((m) => (m as { to: ChessSquare }).to);
 };
 
 /**
